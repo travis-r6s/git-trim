@@ -6,130 +6,396 @@ OPTIONS_STUCKLONG=true
 OPTIONS_SPEC="\
 git trim [options]
 
-Removes merged, pruned, untracked, and stale branches within a repository.
-https://github.com/jasonmccreary/git-trim/
+Finds stale branches, lets you pick which to remove, and confirms before deleting anything.
+With no category options it looks for pruned, merged and squash-merged branches.
+https://github.com/travis-r6s/git-trim/
 --
-  Available options are:
-all!              remove all local branches, except the current branch
-dry-run!          prints branches which will be removed instead of deleting them
-m,merged!         remove local branches already merged into the current branch
-p,pruned!         remove local branches where its remote branch no longer exists
-r,remote!         remove remote branches instead of local branches
-reset=?           remove all local branches except those existing on remote (default: origin)
-s,stale!          remove local branches without commits in the last 3 months
-q,squashed!       remove local branches already squash-merged into the current branch
-t,tracked!        remove the tracking branch from remote
-u,untracked!      remove local branches not tracking a remote branch
+  Categories (combine freely):
+p,pruned!         local branches whose remote branch no longer exists
+m,merged!         branches merged into the default branch
+q,squashed!       branches squash-merged into the default branch
+s,stale!          branches without commits in the last 3 months
+u,untracked!      local branches not tracking a remote branch
+all!              every local branch except protected ones
+reset=?           local branches not on the given remote (default: origin)
+  Modifiers:
+r,remote!         remove remote branches instead of local ones (merged, squashed, stale, all)
+t,tracked!        also remove the remote branch each local branch tracks
+dry-run!          list what would be removed without deleting anything
 "
 
 SUBDIRECTORY_OK='Yes' . "$(git --exec-path)/git-sh-setup"
 
+# Only after git-sh-setup, which is not written for nounset.
+set -euo pipefail
 
-# Functions
-filter_branches() {
-  local restore_glob=0
-  if [[ ! -o noglob ]]; then
-    restore_glob=1
-    set -o noglob
+# Internal records use the unit separator: tabs are IFS whitespace, so empty fields would collapse.
+US=$'\x1f'
+TAB=$'\t'
+SEP=' · '
+
+
+# Output
+require_gum() {
+  if ! command -v gum >/dev/null 2>&1; then
+    printf 'git-trim: gum is required. Install it from https://github.com/charmbracelet/gum#installation\n' >&2
+    exit 1
   fi
-  local exclude=( $(git config gt.exclude) )
-  [ $restore_glob -eq 1 ] && set +o noglob
+}
 
-  if [ ${#exclude} -eq 0 ]; then
-    echo "$@"
+die() {
+  # "--" so a message starting with an option name is not parsed as a gum flag.
+  gum log --level error -- "$*"
+  exit 1
+}
+
+info() {
+  gum log --level info -- "$*"
+}
+
+heading() {
+  gum style --bold --foreground 212 --margin "1 0 0 0" "$*"
+}
+
+spin() {
+  # Like gum spin --show-error, without the spinner when there is no terminal to draw on.
+  local title="$1" err
+  shift
+  if [[ -t 2 ]]; then
+    gum spin --show-error --title "$title" -- "$@"
+  elif ! err="$("$@" 2>&1 >/dev/null)"; then
+    printf '%s\n' "$err" >&2
+    return 1
+  fi
+}
+
+spin_fn() {
+  # gum spin only runs external commands, so spin on the PID of a backgrounded function.
+  local title="$1" out pid
+  shift
+  if [[ ! -t 2 ]]; then
+    "$@"
     return
   fi
+  out="$(mktemp)"
+  "$@" >"$out" &
+  pid=$!
+  gum spin --title "$title" -- bash -c "while kill -0 $pid 2>/dev/null; do sleep 0.1; done"
+  if ! wait "$pid"; then
+    rm -f "$out"
+    return 1
+  fi
+  cat "$out"
+  rm -f "$out"
+}
 
-  local branches=()
 
-  for branch in "$@"; do
-    if [ $remote -eq 1 ]; then
-      for excluded in "${exclude[@]}"; do
-        if [[ "$branch" == */$excluded ]]; then
-          continue 2
-        fi
-      done
+# Context
+resolve_default_branch() {
+  local head
+  head="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null)" \
+    || die "Cannot find the default branch from origin/HEAD. Set it with: git remote set-head origin --auto"
+  printf '%s\n' "${head#origin/}"
+}
 
-      branches+=("$branch")
-    else
-      local matched=0
-      for excluded in "${exclude[@]}"; do
-        if [[ "$branch" == $excluded ]]; then
-          matched=1
-          break
-        fi
-      done
+load_excludes() {
+  # Split with globbing off so patterns like save/* stay patterns.
+  local raw
+  raw="$(git config --get gt.exclude || true)"
+  set -o noglob
+  # shellcheck disable=SC2206 # word splitting is intended
+  excludes=($raw)
+  set +o noglob
+}
 
-      [ $matched -eq 0 ] && branches+=("$branch")
+load_worktree_branches() {
+  local porcelain line
+  porcelain="$(git worktree list --porcelain)"
+  while IFS= read -r line; do
+    if [[ "$line" == "branch refs/heads/"* ]]; then
+      worktree["${line#branch refs/heads/}"]=1
+    fi
+  done <<<"$porcelain"
+}
+
+is_excluded() {
+  local name="$1" pattern
+  for pattern in "${excludes[@]}"; do
+    # shellcheck disable=SC2053 # unquoted so gt.exclude globs match
+    if [[ "$name" == $pattern ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_protected() {
+  # Branch names that are never removed, locally or on any remote.
+  local name="$1"
+  [[ "$name" == "$default_branch" || "$name" == "$current_branch" ]] || is_excluded "$name"
+}
+
+
+# Classification
+squash_merged() {
+  # Build one commit holding the branch's whole diff from its merge-base; git cherry
+  # prints "-" when an equivalent patch is already in base.
+  local ref="$1" merge_base squashed
+  merge_base="$(git merge-base "$base" "$ref")" || return 1
+  squashed="$(git commit-tree "$(git rev-parse "$ref^{tree}")" -p "$merge_base" -m _)"
+  [[ "$(git cherry "$base" "$squashed")" == -* ]]
+}
+
+join_reasons() {
+  local IFS=$'\x1e'
+  local joined="$*"
+  printf '%s' "${joined//$'\x1e'/$SEP}"
+}
+
+emit() {
+  # One record per candidate:
+  # kind US name US reasons US at_risk US age US sha US subject US remote US remote_branch
+  local IFS="$US"
+  printf '%s\n' "$*"
+}
+
+classify_local() {
+  local heads name upstream track date age sha subject merged squashed at_risk remote remote_branch
+  local -a reasons
+  heads="$(git for-each-ref refs/heads \
+    --format="%(refname:short)$US%(upstream:short)$US%(upstream:track)$US%(committerdate:unix)$US%(committerdate:relative)$US%(objectname:short)$US%(subject)")"
+
+  while IFS="$US" read -r name upstream track date age sha subject; do
+    if [[ -z "$name" ]] || is_protected "$name"; then
+      continue
+    fi
+
+    reasons=()
+    merged=0
+    squashed=0
+    if git merge-base --is-ancestor "refs/heads/$name" "$base"; then
+      merged=1
+    elif ((want_squashed)) && squash_merged "refs/heads/$name"; then
+      squashed=1
+    fi
+
+    if ((want_pruned)) && [[ "$track" == "[gone]" ]]; then reasons+=(gone); fi
+    if ((want_merged && merged)); then reasons+=(merged); fi
+    if ((squashed)); then reasons+=(squash-merged); fi
+    if ((want_stale && date < stale_before)); then reasons+=(stale); fi
+    if ((want_untracked)) && [[ -z "$upstream" ]]; then reasons+=(untracked); fi
+    if [[ -n "$reset" ]] && ! git show-ref --verify --quiet "refs/remotes/$reset/$name"; then
+      reasons+=("not on $reset")
+    fi
+    if ((want_all)); then reasons+=(all); fi
+    if ((${#reasons[@]} == 0)); then
+      continue
+    fi
+
+    if [[ -n "${worktree[$name]:-}" ]]; then
+      emit skip "$name"
+      continue
+    fi
+
+    # --tracked deletes the upstream too, never one that is gone or protected.
+    remote=''
+    remote_branch=''
+    if ((tracked)) && [[ -n "$upstream" && "$track" != "[gone]" ]]; then
+      remote="$(git config --get "branch.$name.remote" || true)"
+      remote_branch="$(git config --get "branch.$name.merge" || true)"
+      remote_branch="${remote_branch#refs/heads/}"
+      if [[ -z "$remote" || -z "$remote_branch" ]] || is_protected "$remote_branch"; then
+        remote=''
+        remote_branch=''
+      fi
+    fi
+
+    # Commits that exist nowhere else once this is deleted. Merged work is safe by definition.
+    at_risk=0
+    if ((!merged && !squashed)); then
+      if [[ -n "$remote" ]]; then
+        at_risk="$(git rev-list --count "refs/heads/$name" --not "$base")"
+      else
+        at_risk="$(git rev-list --count "refs/heads/$name" --not --remotes)"
+      fi
+    fi
+
+    emit local "$name" "$(join_reasons "${reasons[@]}")" "$at_risk" "$age" "$sha" "$subject" "$remote" "$remote_branch"
+  done <<<"$heads"
+}
+
+classify_remote() {
+  local remotes remote refs name date age sha subject ref merged squashed at_risk
+  local -a reasons
+  remotes="$(git remote)"
+
+  while IFS= read -r remote; do
+    if [[ -z "$remote" ]]; then
+      continue
+    fi
+    refs="$(git for-each-ref "refs/remotes/$remote/" \
+      --format="%(refname:lstrip=3)$US%(committerdate:unix)$US%(committerdate:relative)$US%(objectname:short)$US%(subject)")"
+
+    while IFS="$US" read -r name date age sha subject; do
+      if [[ -z "$name" || "$name" == HEAD ]] || is_protected "$name"; then
+        continue
+      fi
+      ref="refs/remotes/$remote/$name"
+
+      reasons=()
+      merged=0
+      squashed=0
+      if git merge-base --is-ancestor "$ref" "$base"; then
+        merged=1
+      elif ((want_squashed)) && squash_merged "$ref"; then
+        squashed=1
+      fi
+
+      if ((want_merged && merged)); then reasons+=(merged); fi
+      if ((squashed)); then reasons+=(squash-merged); fi
+      if ((want_stale && date < stale_before)); then reasons+=(stale); fi
+      if ((want_all)); then reasons+=(all); fi
+      if ((${#reasons[@]} == 0)); then
+        continue
+      fi
+
+      if [[ -n "${worktree[$name]:-}" ]]; then
+        emit skip "$remote/$name"
+        continue
+      fi
+
+      at_risk=0
+      if ((!merged && !squashed)); then
+        at_risk="$(git rev-list --count "$ref" --not "$base")"
+      fi
+
+      emit remote "$remote/$name" "$(join_reasons "${reasons[@]}")" "$at_risk" "$age" "$sha" "$subject" "$remote" "$name"
+    done <<<"$refs"
+  done <<<"$remotes"
+}
+
+classify() {
+  if ((remote_mode)); then
+    classify_remote
+  else
+    classify_local
+  fi
+}
+
+
+# Review
+action_for() {
+  local i="$1"
+  if [[ "${c_kind[$i]}" == remote ]]; then
+    printf 'delete on %s' "${c_remote[$i]}"
+  elif [[ -n "${c_remote[$i]}" ]]; then
+    printf 'delete local + %s/%s' "${c_remote[$i]}" "${c_remote_branch[$i]}"
+  else
+    printf 'delete local'
+  fi
+}
+
+risk_label() {
+  local i="$1"
+  if ((c_at_risk[$i] == 0)); then
+    printf -- '-'
+  else
+    printf '%s commit(s)' "${c_at_risk[$i]}"
+  fi
+}
+
+print_table() {
+  # Tab-separated: commit subjects contain commas, gum table's default separator.
+  local i
+  {
+    printf 'Branch\tWhy\tAt risk\tLast commit\tAction\tSubject\n'
+    for i in "$@"; do
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "${c_name[$i]}" "${c_reasons[$i]}" "$(risk_label "$i")" \
+        "${c_age[$i]}" "$(action_for "$i")" "${c_subject[$i]:0:50}"
+    done
+  } | gum table --print --separator "$TAB" --border rounded --border.foreground 240
+}
+
+pick_label() {
+  # gum matches --selected against labels and splits it on commas, so labels carry none.
+  local i="$1" label
+  label="$(printf '%-40s %s' "${c_name[$i]}" "${c_reasons[$i]}")"
+  if ((c_at_risk[$i] > 0)); then
+    label+="${SEP}${c_at_risk[$i]} commit(s) at risk"
+  fi
+  printf '%s' "${label//,/;}"
+}
+
+pick() {
+  # Prints the chosen candidate indices; at-risk branches start unticked.
+  local i label options='' preselect=''
+  for i in "${!c_name[@]}"; do
+    label="$(pick_label "$i")"
+    options+="$label$TAB$i"$'\n'
+    if ((c_at_risk[$i] == 0)); then
+      preselect+="${preselect:+,}$label"
     fi
   done
 
-  echo "${branches[*]}"
+  local -a args=(--no-limit --height 20 --label-delimiter "$TAB"
+    --header "Select branches to delete (tab or x toggles, enter continues)")
+  if [[ -n "$preselect" ]]; then
+    args+=(--selected "$preselect")
+  fi
+  printf '%s' "$options" | gum choose "${args[@]}"
 }
 
-prune_all() {
-  git fetch --all -p > /dev/null 2>&1
+confirm() {
+  # Enter alone means no.
+  gum confirm --default=false --affirmative "Delete" --negative "Cancel" "$1"
 }
 
-remove_tracking_branch() {
-  local remote=$(git config "branch.${1}.remote")
 
-  if [ -z "$remote" ]; then
-    return
+# Deletion
+delete_candidate() {
+  local i="$1"
+  if [[ "${c_kind[$i]}" == remote ]]; then
+    spin "Deleting ${c_name[$i]}" git push "${c_remote[$i]}" --delete "${c_remote_branch[$i]}" || return 1
+    gum log --structured --level info "Deleted remote branch" name "${c_name[$i]}" was "${c_sha[$i]}"
+    return 0
   fi
 
-  local upstream_branch_full_name=$(git config "branch.$1.merge")
-  local upstream_branch=${upstream_branch_full_name#"refs/heads/"}
-
-  remove_remote_branch $remote $upstream_branch
-}
-
-remove_remote_branch() {
-  if [ $dry_run -eq 1 ]; then
-    echo "$2 will be deleted from $1."
-  else
-    git push -d $1 $2 >/dev/null 2>&1
-    if [ $? -eq 0 ]; then
-      echo "Deleted branch $2 (on $1)."
-    fi
-  fi
-}
-
-remove_local_branch() {
-  if [ $dry_run -eq 1 ]; then
-    echo "$1 will be deleted."
-  else
-    git branch -D $1
+  spin "Deleting ${c_name[$i]}" git branch -D -- "${c_name[$i]}" || return 1
+  gum log --structured --level info "Deleted branch" name "${c_name[$i]}" was "${c_sha[$i]}"
+  if [[ -n "${c_remote[$i]}" ]]; then
+    spin "Deleting ${c_remote[$i]}/${c_remote_branch[$i]}" \
+      git push "${c_remote[$i]}" --delete "${c_remote_branch[$i]}" || return 1
+    gum log --structured --level info "Deleted remote branch" name "${c_remote[$i]}/${c_remote_branch[$i]}"
   fi
 }
 
 
 # Defaults
-all=0
 dry_run=0
-merged=0
-pruned=0
-squashed=0
-stale=0
+remote_mode=0
 tracked=0
-untracked=0
-remote=0
 reset=''
-current_branch=$(git symbolic-ref -q --short HEAD)
-worktree_branches=( $(git worktree list --porcelain | grep '^branch ' | sed 's|^branch refs/heads/||') )
-options=$#
+want_pruned=0
+want_merged=0
+want_squashed=0
+want_stale=0
+want_untracked=0
+want_all=0
+declare -a excludes=()
+declare -A worktree=()
 
 # Parse options
 while [ $# != 0 ]; do
   case "$1" in
-    --all) all=1;;
-    --stale) stale=1;;
-    --squashed) squashed=1;;
-    --merged) merged=1;;
-    --pruned) pruned=1;;
+    --all) want_all=1;;
+    --stale) want_stale=1;;
+    --squashed) want_squashed=1;;
+    --merged) want_merged=1;;
+    --pruned) want_pruned=1;;
+    --untracked) want_untracked=1;;
     --tracked) tracked=1;;
-    --untracked) untracked=1;;
-    --remote) remote=1;;
+    --remote) remote_mode=1;;
     --reset=*) reset="${1#*=}";;
     --reset) reset='origin';;
     --dry-run) dry_run=1;;
@@ -138,236 +404,129 @@ while [ $# != 0 ]; do
   shift
 done
 
-if [[ $options -eq 1 || ($options -eq 2 && $dry_run -eq 1) ]]; then
-  pruned=1
+require_gum
+
+if ((!want_pruned && !want_merged && !want_squashed && !want_stale && !want_untracked && !want_all)) \
+  && [[ -z "$reset" ]]; then
+  want_merged=1
+  want_squashed=1
+  if ((!remote_mode)); then
+    want_pruned=1
+  fi
 fi
 
-
-# all
-if [ $all -eq 1 ]; then
-  while true; do
-    read -p "Are you sure you want to remove all branches? " choice
-    case $(echo $choice | tr '[A-Z]' '[a-z]') in
-      y|yes) break;;
-      *) exit;;
-    esac
-  done
-
-  command='git branch'
-  if [ $remote -eq 1 ]; then
-    prune_all
-    command="$command -a"
-  fi
-
-  branches=( $($command | grep -v '^[*+]') )
-  if [ $remote -eq 1 ]; then
-    branches=( $(printf '%s\n' "${branches[@]}" | grep -vF "/$current_branch") )
-  fi
-  branches=( $(filter_branches "${branches[@]}") )
-
-  if [ ${#branches} -eq 0 ]; then
-    echo "No branches need to be trimmed."
-    exit 0
-  fi
-
-  for branch in "${branches[@]}"; do
-    if [ $remote -eq 1 ]; then
-      if [ "${branch:0:8}" == "remotes/" ]; then
-        name="${branch:8}"
-        remove_remote_branch ${name%%/*} ${name#*/}
-      fi
-    else
-      remove_local_branch $branch
-
-      if [ $tracked -eq 1 ]; then
-        remove_tracking_branch $branch
-      fi
-    fi
-  done
+if ((remote_mode)) && { ((want_pruned || want_untracked || tracked)) || [[ -n "$reset" ]]; }; then
+  die "--remote only works with --merged, --squashed, --stale and --all."
 fi
 
-
-# merged
-if [ $merged -eq 1 ]; then
-  command='git branch'
-  if [ $remote -eq 1 ]; then
-    prune_all
-    command="$command -r"
-  fi
-
-  branches=( $($command --merged | grep -v '^[*+]') )
-  if [ $remote -eq 1 ]; then
-    branches=( $(printf '%s\n' "${branches[@]}" | grep -vF "/$current_branch") )
-  fi
-  branches=( $(filter_branches "${branches[@]}") )
-
-  if [ ${#branches} -eq 0 ]; then
-    echo "There are no merged branches to trim."
-    exit 0
-  fi
-
-  for branch in "${branches[@]}"; do
-    if [ $remote -eq 1 ]; then
-      remove_remote_branch ${branch%%/*} ${branch#*/}
-    else
-      if [ $tracked -eq 1 ]; then
-        remove_tracking_branch $branch
-      fi
-
-      remove_local_branch $branch
-    fi
-  done
+if ((!dry_run)) && [[ ! -t 0 || ! -t 1 ]]; then
+  die "git trim asks before deleting anything, so it needs a terminal. Use --dry-run to only list branches."
 fi
 
+if [[ -n "$reset" ]] && ! git remote get-url "$reset" >/dev/null 2>&1; then
+  die "No remote named '$reset'."
+fi
 
-# squashed
-if [ $squashed -eq 1 ]; then
-  command='git for-each-ref --format=%(refname:short)'
-  if [ $remote -eq 1 ]; then
-    prune_all
-    command="$command refs/remotes/"
+spin "Fetching and pruning remotes..." git fetch --all --prune \
+  || die "Fetch failed, so remote branch data may be stale. Nothing was deleted."
+
+default_branch="$(resolve_default_branch)"
+base="refs/remotes/origin/$default_branch"
+current_branch="$(git symbolic-ref --quiet --short HEAD || true)"
+stale_before="$(git rev-parse --since='3 months ago')"
+stale_before="${stale_before#--max-age=}"
+load_excludes
+load_worktree_branches
+
+records="$(spin_fn "Looking for branches to trim..." classify)" || die "Could not classify branches."
+
+declare -a c_kind=() c_name=() c_reasons=() c_at_risk=() c_age=() c_sha=() c_subject=() c_remote=() c_remote_branch=()
+declare -a skipped=()
+while IFS="$US" read -r kind name reasons at_risk age sha subject remote remote_branch; do
+  if [[ "$kind" == skip ]]; then
+    skipped+=("$name")
+  elif [[ -n "$kind" ]]; then
+    c_kind+=("$kind")
+    c_name+=("$name")
+    c_reasons+=("$reasons")
+    c_at_risk+=("$at_risk")
+    c_age+=("$age")
+    c_sha+=("$sha")
+    c_subject+=("$subject")
+    c_remote+=("$remote")
+    c_remote_branch+=("$remote_branch")
+  fi
+done <<<"$records"
+
+target="local branches"
+if ((remote_mode)); then
+  target="remote branches"
+fi
+heading "git trim · $target compared with origin/$default_branch"
+
+if ((${#skipped[@]} > 0)); then
+  info "Skipping branches checked out in a worktree: ${skipped[*]}"
+fi
+
+if ((${#c_name[@]} == 0)); then
+  info "No branches need to be trimmed."
+  exit 0
+fi
+
+if ((dry_run)); then
+  print_table "${!c_name[@]}"
+  info "Dry run: nothing was deleted."
+  exit 0
+fi
+
+chosen="$(pick)" || { info "Cancelled. Nothing was deleted."; exit 0; }
+declare -a selected=()
+if [[ -n "$chosen" ]]; then
+  mapfile -t selected <<<"$chosen"
+fi
+if ((${#selected[@]} == 0)); then
+  info "No branches selected. Nothing was deleted."
+  exit 0
+fi
+
+declare -a at_risk_selected=() to_delete=()
+for i in "${selected[@]}"; do
+  if ((c_at_risk[$i] > 0)); then
+    at_risk_selected+=("$i")
   else
-    command="$command refs/heads/"
+    to_delete+=("$i")
   fi
+done
 
-  all_branches=( $($command) )
-  all_branches=( $(filter_branches "${all_branches[@]}") )
-  branches=()
-
-  for branch in "${all_branches[@]}"; do
-    if [ "$branch" == "$current_branch" ]; then
-      continue
-    fi
-    local check_branch="$branch"
-    [ $remote -eq 1 ] && check_branch="${branch#*/}"
-    if [[ " ${worktree_branches[*]} " =~ " $check_branch " ]]; then
-      continue
-    fi
-
-    merge_base=$(git merge-base $current_branch $branch 2>/dev/null) || continue
-    tree_commit=$(git commit-tree $(git rev-parse "$branch^{tree}") -p $merge_base -m _) || continue
-
-    if [[ $(git cherry $current_branch $tree_commit) == "-"* ]]; then
-      branches+=($branch)
-    fi
-  done
-
-  if [ ${#branches} -eq 0 ]; then
-    echo "There are no squash-merged branches to trim."
-    exit 0
+if ((${#at_risk_selected[@]} > 0)); then
+  heading "These have commits that exist nowhere else, which will be lost"
+  print_table "${at_risk_selected[@]}"
+  if confirm "Include these ${#at_risk_selected[@]} branch(es)?"; then
+    to_delete+=("${at_risk_selected[@]}")
+  else
+    info "Leaving them out."
   fi
-
-  for branch in "${branches[@]}"; do
-    if [ $remote -eq 1 ]; then
-      remove_remote_branch ${branch%%/*} ${branch#*/}
-    else
-      if [ $tracked -eq 1 ]; then
-        remove_tracking_branch $branch
-      fi
-
-      remove_local_branch $branch
-    fi
-  done
 fi
 
-
-# pruned
-if [ $pruned -eq 1 ]; then
-  prune_all
-  branches=( $(LANG=C git branch -vv | grep -v '^[*+]' | awk '/: gone]/{print $1}') )
-  branches=( $(filter_branches "${branches[@]}") )
-
-  if [ ${#branches} -eq 0 ]; then
-    echo "There are no local branches to trim."
-    exit 0
-  fi
-
-  for branch in "${branches[@]}"; do
-    remove_local_branch $branch
-  done
+if ((${#to_delete[@]} == 0)); then
+  info "Nothing left to delete."
+  exit 0
 fi
 
-
-# stale
-if [ $stale -eq 1 ]; then
-  command='git branch'
-  if [ $remote -eq 1 ]; then
-    prune_all
-    command="$command -r"
-  fi
-
-  all_branches=( $($command | grep -v '^[*+]') )
-  all_branches=( $(filter_branches "${all_branches[@]}") )
-  branches=()
-
-  for branch in "${all_branches[@]}"; do
-    [[ $(git log -1 -s --since="3 months ago" $branch) ]] || branches+=($branch)
-  done
-
-  if [ ${#branches} -eq 0 ]; then
-    echo "There are no stale branches to trim."
-    exit 0
-  fi
-
-  for branch in "${branches[@]}"; do
-    if [ $remote -eq 1 ]; then
-      remove_remote_branch ${branch%%/*} ${branch#*/}
-    else
-      remove_local_branch $branch
-    fi
-  done
+heading "About to delete"
+print_table "${to_delete[@]}"
+if ! confirm "Delete ${#to_delete[@]} branch(es)?"; then
+  info "Cancelled. Nothing was deleted."
+  exit 0
 fi
 
+declare -a failed=()
+for i in "${to_delete[@]}"; do
+  delete_candidate "$i" || failed+=("${c_name[$i]}")
+done
 
-# untracked
-if [ $untracked -eq 1 ]; then
-  branches=( $(git branch --format='%(if)%(upstream)%(then)%(else)%(refname:short)%(end)' | awk NF) )
-  branches=( $(filter_branches "${branches[@]}") )
-
-  if [ ${#branches} -eq 0 ]; then
-    echo "There are no untracked branches to trim."
-    exit 0
-  fi
-
-  for branch in "${branches[@]}"; do
-    if [ "$branch" != "$current_branch" ] && [[ ! " ${worktree_branches[*]} " =~ " $branch " ]]; then
-      remove_local_branch $branch
-    fi
-  done
+deleted=$((${#to_delete[@]} - ${#failed[@]}))
+if ((${#failed[@]} > 0)); then
+  die "Deleted $deleted, failed ${#failed[@]}: ${failed[*]}"
 fi
-
-
-# reset
-if [ -n "$reset" ]; then
-  while true; do
-    read -p "Are you sure you want to remove all local branches not on $reset? " choice
-    case $(echo $choice | tr '[A-Z]' '[a-z]') in
-      y|yes) break;;
-      *) exit;;
-    esac
-  done
-
-  git fetch -p $reset > /dev/null 2>&1
-
-  remote_branches=( $(git ls-remote --heads origin | cut -f 2) )
-  local_branches=( $(git branch | grep -v '^[*+]') )
-  branches=()
-
-  for branch in "${local_branches[@]}"; do
-    [[ ! " ${remote_branches[*]} " =~ " refs/heads/${branch} " ]] && branches+=($branch)
-  done
-
-  branches=( $(filter_branches "${branches[@]}") )
-
-  if [ ${#branches} -eq 0 ]; then
-    echo "No branches need to be trimmed."
-    exit 0
-  fi
-
-  for branch in "${branches[@]}"; do
-    remove_local_branch $branch
-  done
-fi
-
-
-exit 0
+info "Deleted $deleted branch(es). Restore a local one with: git branch <name> <was>"

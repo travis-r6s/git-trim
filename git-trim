@@ -35,16 +35,17 @@ TAB=$'\t'
 SEP=' · '
 
 # Palette.
-BLUE='#0037E6'
 MIDNIGHT_800='#2E2D55'
 MIDNIGHT_600='#5C5C7D'
 MIDNIGHT_300='#A9AABD'
 MIDNIGHT_200='#C5C6D3'
 PURPLE='#9566FF'
 PURPLE_300='#BFA3FF'
-BLUE_300='#7598FF'
+INFO='#BACBFF'
 WHITE='#FFFFFF'
 WARNING='#EE9C38'
+SUCCESS='#12A356'
+ERROR='#FA4B44'
 
 
 # Output
@@ -55,18 +56,29 @@ require_gum() {
   fi
 }
 
-die() {
+log() {
+  # log <level> <colour> <message> [key value ...]
   # "--" so a message starting with an option name is not parsed as a gum flag.
-  gum log --level error -- "$*"
+  local level="$1" colour="$2"
+  shift 2
+  gum log --structured --level "$level" --level.foreground "$colour" --key.foreground "$MIDNIGHT_300" -- "$@"
+}
+
+die() {
+  log error "$ERROR" "$*"
   exit 1
 }
 
 info() {
-  gum log --level info -- "$*"
+  log info "$INFO" "$*"
+}
+
+success() {
+  log info "$SUCCESS" "$@"
 }
 
 banner() {
-  gum style --bold --foreground "$WHITE" --background "$BLUE" --padding "0 1" --margin "1 0 0 0" "$*"
+  gum style --bold --foreground "$INFO" --margin "1 0 0 0" "$*"
 }
 
 heading() {
@@ -397,7 +409,7 @@ pick() {
 
   local -a args=(--no-limit --height 20 --label-delimiter "$TAB"
     --header "Select branches to delete (tab or x toggles, enter continues)"
-    --cursor.foreground "$PURPLE" --header.foreground "$MIDNIGHT_300" --selected.foreground "$BLUE_300")
+    --cursor.foreground "$PURPLE" --header.foreground "$MIDNIGHT_300" --selected.foreground "$INFO")
   if [[ -n "$preselect" ]]; then
     args+=(--selected "$preselect")
   fi
@@ -417,16 +429,16 @@ delete_candidate() {
   local i="$1"
   if [[ "${c_kind[$i]}" == remote ]]; then
     spin "Deleting ${c_name[$i]}" git push "${c_remote[$i]}" --delete "${c_remote_branch[$i]}" || return 1
-    gum log --structured --level info "Deleted remote branch" name "${c_name[$i]}" was "${c_sha[$i]}"
+    success "Deleted remote branch" name "${c_name[$i]}" was "${c_sha[$i]}"
     return 0
   fi
 
   spin "Deleting ${c_name[$i]}" git branch -D -- "${c_name[$i]}" || return 1
-  gum log --structured --level info "Deleted branch" name "${c_name[$i]}" was "${c_sha[$i]}"
+  success "Deleted branch" name "${c_name[$i]}" was "${c_sha[$i]}"
   if [[ -n "${c_remote[$i]}" ]]; then
     spin "Deleting ${c_remote[$i]}/${c_remote_branch[$i]}" \
       git push "${c_remote[$i]}" --delete "${c_remote_branch[$i]}" || return 1
-    gum log --structured --level info "Deleted remote branch" name "${c_remote[$i]}/${c_remote_branch[$i]}"
+    success "Deleted remote branch" name "${c_remote[$i]}/${c_remote_branch[$i]}"
   fi
 }
 
@@ -591,4 +603,4 @@ deleted=$((${#to_delete[@]} - ${#failed[@]}))
 if ((${#failed[@]} > 0)); then
   die "Deleted $deleted, failed ${#failed[@]}: ${failed[*]}"
 fi
-info "Deleted $deleted branch(es). Restore a local one with: git branch <name> <was>"
+success "Deleted $deleted branch(es). Restore a local one with: git branch <name> <was>"

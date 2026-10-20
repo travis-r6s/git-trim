@@ -173,15 +173,16 @@ classify_local() {
     reasons=()
     merged=0
     squashed=0
+    # Squash detection runs regardless of --squashed so at-risk counts stay accurate in every mode.
     if git merge-base --is-ancestor "refs/heads/$name" "$base"; then
       merged=1
-    elif ((want_squashed)) && squash_merged "refs/heads/$name"; then
+    elif squash_merged "refs/heads/$name"; then
       squashed=1
     fi
 
     if ((want_pruned)) && [[ "$track" == "[gone]" ]]; then reasons+=(gone); fi
     if ((want_merged && merged)); then reasons+=(merged); fi
-    if ((squashed)); then reasons+=(squash-merged); fi
+    if ((want_squashed && squashed)); then reasons+=(squash-merged); fi
     if ((want_stale && date < stale_before)); then reasons+=(stale); fi
     if ((want_untracked)) && [[ -z "$upstream" ]]; then reasons+=(untracked); fi
     if [[ -n "$reset" ]] && ! git show-ref --verify --quiet "refs/remotes/$reset/$name"; then
@@ -247,12 +248,12 @@ classify_remote() {
       squashed=0
       if git merge-base --is-ancestor "$ref" "$base"; then
         merged=1
-      elif ((want_squashed)) && squash_merged "$ref"; then
+      elif squash_merged "$ref"; then
         squashed=1
       fi
 
       if ((want_merged && merged)); then reasons+=(merged); fi
-      if ((squashed)); then reasons+=(squash-merged); fi
+      if ((want_squashed && squashed)); then reasons+=(squash-merged); fi
       if ((want_stale && date < stale_before)); then reasons+=(stale); fi
       if ((want_all)); then reasons+=(all); fi
       if ((${#reasons[@]} == 0)); then

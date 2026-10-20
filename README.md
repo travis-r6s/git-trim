@@ -70,13 +70,21 @@ git clone https://github.com/travis-r6s/git-trim.git $ZSH_CUSTOM/plugins/git-tri
 
 Then add `git-trim` to `plugins=(...)` in `~/.zshrc`. The plugin puts the script on your `PATH`, so it runs as `git trim`.
 
-### Anywhere else
-Put the `git-trim` script somewhere on your `PATH`.
+### Any shell
+It is a plain bash script, so zsh is optional. Install it to `~/.local/bin`, which needs to be on your `PATH`:
+
+```sh
+mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/travis-r6s/git-trim/main/git-trim -o ~/.local/bin/git-trim && chmod +x ~/.local/bin/git-trim
+```
 
 ## Updating
+Oh My Zsh:
+
 ```sh
 git -C $ZSH_CUSTOM/plugins/git-trim pull
 ```
+
+Otherwise, re-run the install command.
 
 ## Configuration
 To protect more branches, set `gt.exclude` to a space-separated list of names or glob patterns, locally or globally:

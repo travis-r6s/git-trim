@@ -134,6 +134,10 @@ echo "combined categories"
 "$GT" --merged --squashed --dry-run >"$ROOT/out" 2>&1
 check "runs every requested category" bash -c "grep -q merged-br '$ROOT/out' && grep -q 'squash-merged' '$ROOT/out'"
 
+echo "squash detection outside --squashed"
+"$GT" --pruned --dry-run >"$ROOT/out" 2>&1
+check "--pruned does not flag a squash-merged branch as at risk" bash -c "grep '│ sq ' '$ROOT/out' | grep -q '│ -  '"
+
 echo "refuses without a terminal"
 check "exits non-zero" not "$GT" </dev/null >"$ROOT/out" 2>&1
 check "says why" output_has "needs a terminal"

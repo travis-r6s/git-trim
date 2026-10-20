@@ -58,7 +58,7 @@ These are never offered, locally or on a remote:
 Because every deletion is reviewed and its safety is checked up front, local branches are removed with `git branch -D`. `-d` would refuse squash-merged branches, and it judges "merged" against the branch's upstream or `HEAD` rather than the default branch.
 
 ## Appearance
-Colours live in the palette block at the top of the script: a blue heading, purple accents, amber for at-risk warnings, and RAG colours for log levels (blue info, green for deletions, red errors). Without `COLORTERM=truecolor`, gum rounds them to the nearest 256-colour match. Add `export COLORTERM=truecolor` to your shell profile if they look off.
+Colours live in the palette block at the top of the script. Purple is primary (heading, prompts, picker); blue is for info and buttons, with the focused button filled and the other as blue text; amber marks at-risk warnings; green and red mark deletions and errors. Without `COLORTERM=truecolor`, gum rounds them to the nearest 256-colour match. Add `export COLORTERM=truecolor` to your shell profile if they look off.
 
 ## Requirements
 - [gum](https://github.com/charmbracelet/gum#installation) v2 or newer. On Debian/Ubuntu, add Charm's apt repository and `sudo apt install gum`.

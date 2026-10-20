@@ -34,14 +34,14 @@ US=$'\x1f'
 TAB=$'\t'
 SEP=' · '
 
-# Palette.
-MIDNIGHT_800='#2E2D55'
+# Palette: purple is primary, blue is for info and buttons.
 MIDNIGHT_600='#5C5C7D'
 MIDNIGHT_300='#A9AABD'
 MIDNIGHT_200='#C5C6D3'
 PURPLE='#9566FF'
 PURPLE_300='#BFA3FF'
 INFO='#BACBFF'
+BLUE='#0037E6'
 WHITE='#FFFFFF'
 WARNING='#EE9C38'
 SUCCESS='#12A356'
@@ -78,7 +78,7 @@ success() {
 }
 
 banner() {
-  gum style --bold --foreground "$INFO" --margin "1 0 0 0" "$*"
+  gum style --bold --foreground "$PURPLE" --margin "1 0 0 0" "$*"
 }
 
 heading() {
@@ -409,7 +409,7 @@ pick() {
 
   local -a args=(--no-limit --height 20 --label-delimiter "$TAB"
     --header "Select branches to delete (tab or x toggles, enter continues)"
-    --cursor.foreground "$PURPLE" --header.foreground "$MIDNIGHT_300" --selected.foreground "$INFO")
+    --cursor.foreground "$PURPLE" --header.foreground "$MIDNIGHT_300" --selected.foreground "$PURPLE_300")
   if [[ -n "$preselect" ]]; then
     args+=(--selected "$preselect")
   fi
@@ -417,10 +417,11 @@ pick() {
 }
 
 confirm() {
-  # Enter alone means no.
+  # Enter alone means no. gum styles buttons by focus, not role, and has no button borders,
+  # so the focused one is filled blue and the other is blue text on no background.
   gum confirm --default=false --affirmative "Delete" --negative "Cancel" \
-    --prompt.foreground "$WHITE" --selected.foreground "$WHITE" --selected.background "$PURPLE" \
-    --unselected.foreground "$MIDNIGHT_200" --unselected.background "$MIDNIGHT_800" "$1"
+    --prompt.foreground "$PURPLE" --selected.foreground "$WHITE" --selected.background "$BLUE" \
+    --unselected.foreground "$INFO" --unselected.background "" "$1"
 }
 
 

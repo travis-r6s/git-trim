@@ -4,3 +4,5 @@
 # ZSH framework like Zgen or Antigen
 
 export PATH=$(dirname $0):${PATH}
+# Shadows any gt command, such as Graphite's CLI; `command gt` still reaches it.
+alias gt='git-trim'

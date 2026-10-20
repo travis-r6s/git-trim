@@ -3,110 +3,108 @@
 ---
 
 # git trim
-A command to quickly remove merged, pruned, untracked, or stale branches within a Git repository.
+Finds stale branches in a Git repository, lets you pick which to remove, and confirms before deleting anything.
+
+This is a fork of [jasonmccreary/git-trim](https://github.com/jasonmccreary/git-trim) that adds an interactive review step built on [gum](https://github.com/charmbracelet/gum), compares against the default branch rather than whatever you have checked out, and never deletes without a confirmation.
 
 ## Usage
 ```sh
 git trim
-git trim --pruned
-git trim -p
-# Removes local branches where its remote branch no longer exists
+# Pruned, merged and squash-merged local branches: pick, review, confirm
 
-git trim --merged
-git trim -m
-# Removes local branches already merged into the current branch
-
-git trim --stale
-git trim -s
-# Removes local branches without commits in the last 3 months
-
-git trim --squashed
-git trim -q
-# Removes local branches already squash-merged into the current branch
-
-git trim --untracked
-git trim -u
-# Removes local branches not tracking a remote branch
-
-git trim --reset[=remote]
-# Removes all local branches except those existing on remote which defaults to "origin" (requires confirmation)
-
-git trim --all
-# Removes all local branches except the current branch (requires confirmation)
+git trim --pruned        # -p  local branches whose remote branch no longer exists
+git trim --merged        # -m  branches merged into the default branch
+git trim --squashed      # -q  branches squash-merged into the default branch
+git trim --stale         # -s  branches without commits in the last 3 months
+git trim --untracked     # -u  local branches not tracking a remote branch
+git trim --reset[=remote]   # local branches not on the remote (default: origin)
+git trim --all           # every local branch except protected ones
 ```
 
-Of course, you may combine these options where appropriate. For example, `git trim --merged --stale`, would remove both local branches which have been merged with the current branch or are _stale_.
+Categories combine freely, e.g. `git trim --merged --stale`. Every requested category is checked; a category with no matches does not stop the others.
 
-There are two additional options which may also be combined with the options above: `--tracked` and `--remote`.
+Modifiers:
 
-When the `--tracked` (or `-t`) option is used, the remote tracking branch is also removed. For example, `git trim --merged --tracked` will remove local branches merged into the current branch, and remove the remote branch it's tracking (if any).
+- `--remote` (`-r`) removes remote branches instead of local ones. It works with `--merged`, `--squashed`, `--stale` and `--all`, and defaults to merged and squash-merged.
+- `--tracked` (`-t`) also removes the remote branch each local branch tracks. It never removes a tracked branch that is protected, such as a branch following `origin/main`.
+- `--dry-run` lists what would be removed, in a table, without asking anything or deleting anything.
 
-When the `--remote` (or `-r`) option is used, `git trim` will remove remote branches instead of local branches. For example, `git trim --stale --remote` will remove remote branches without commits in the last 3 months (stale local branches will not be removed).
+## How a run works
+1. **Fetch.** `git fetch --all --prune` runs first. If it fails, git trim stops rather than work from stale remote data.
+2. **Classify.** Every branch is checked against the requested categories. Merged and squash-merged are measured against `origin/<default branch>` (from `origin/HEAD`), so running from a feature branch never offers `main`.
+3. **Pick.** A gum picker lists every match with why it matched. Branches are pre-selected unless deleting them would lose commits that exist nowhere else (see below). `tab` or `x` toggles, `enter` continues, `esc` cancels.
+4. **At-risk confirmation.** If you selected branches with at-risk commits, they are shown in their own table with a separate confirmation. Declining leaves them out and carries on with the rest.
+5. **Final confirmation.** A table of exactly what will be deleted, and how, followed by a yes/no prompt that defaults to **no**. Nothing is deleted before this.
+6. **Delete.** Each deletion is logged with the commit it pointed to, so a local branch can be restored with `git branch <name> <was>`. Failures are reported and the rest continue; the exit code is non-zero if any failed.
 
-Finally, you may also append the `--dry-run` option to any `git-trim` command to simply list the branches which would be deleted instead of actually removing them.
+git trim needs a terminal for every run except `--dry-run`. There is no non-interactive mode.
+
+### At-risk commits
+A branch is at risk when deleting it would lose commits:
+
+- **Local branch:** commits not reachable from any remote-tracking branch.
+- **Local branch with `--tracked`, or a remote branch:** commits not in the default branch.
+
+Merged and squash-merged branches are never at risk, because their changes are already in the default branch.
+
+### Protected branches
+These are never offered, locally or on a remote:
+
+- the default branch (from `origin/HEAD`)
+- the branch you have checked out
+- branches checked out in another worktree (listed as skipped)
+- anything matching `gt.exclude`
+
+Because every deletion is reviewed and its safety is checked up front, local branches are removed with `git branch -D`. `-d` would refuse squash-merged branches, and it judges "merged" against the branch's upstream or `HEAD` rather than the default branch.
+
+## Appearance
+Colours live in the palette block at the top of the script. Purple is primary (heading, prompts, picker); blue is for info and buttons, with the focused button filled and the other as blue text; amber marks at-risk warnings; green and red mark deletions and errors. Without `COLORTERM=truecolor`, gum rounds them to the nearest 256-colour match. Add `export COLORTERM=truecolor` to your shell profile if they look off.
+
+## Requirements
+- [gum](https://github.com/charmbracelet/gum#installation) v2 or newer. On Debian/Ubuntu, add Charm's apt repository and `sudo apt install gum`.
+- A remote named `origin` with `origin/HEAD` set. If it is missing, run `git remote set-head origin --auto`.
 
 ## Installation
 
-### Basic install
-The preferred installation method is to simply save the `git-trim` script somewhere included in your path. For example, copy `git-trim` into an existing included path like `/usr/local/bin`, or add the parent directory to your `PATH` environment.
-
-### Installing via NPM
+### Oh My Zsh
 ```sh
-npm install --global git-trim
+git clone https://github.com/travis-r6s/git-trim.git $ZSH_CUSTOM/plugins/git-trim
 ```
 
-### Installing via ZSH
+Then add `git-trim` to `plugins=(...)` in `~/.zshrc`. The plugin puts the script on your `PATH`, so it runs as `git trim`, and adds a `gt` alias. The alias hides any `gt` command, such as Graphite's CLI, which `command gt` still reaches.
 
-#### [Oh-My-Zsh](http://ohmyz.sh/)
+### Any shell
+It is a plain bash script, so zsh is optional. Install it to `~/.local/bin`, which needs to be on your `PATH`:
 
-1. Run: `git clone https://github.com/jasonmccreary/git-trim.git $ZSH_CUSTOM/plugins/git-trim`
-2. Add `git-trim` to your plugin list: edit `~/.zshrc` and change
-   `plugins=(...)` to `plugins=(... git-trim)`
+```sh
+mkdir -p ~/.local/bin && curl -fsSL https://raw.githubusercontent.com/travis-r6s/git-trim/main/git-trim -o ~/.local/bin/git-trim && chmod +x ~/.local/bin/git-trim
+```
 
 ## Updating
-Once installed, the easiest way to update is to overwrite your local copy with the latest contents of the `git-trim` script.
+Oh My Zsh:
 
-### Updating via NPM
 ```sh
-npm update --global git-trim
+git -C $ZSH_CUSTOM/plugins/git-trim pull
 ```
 
-### Updating via ZSH
-
-#### Oh-My-Zsh
-```sh
-cd $ZSH_CUSTOM/plugins/git-trim
-git fetch
-git pull
-```
+Otherwise, re-run the install command.
 
 ## Configuration
-By default, `git trim` will never remove the current branch. However, depending on your branching strategy, you may have additional branches you never want to remove. For example, a `dev` or `staging` branch.
-
-If so, you may set a `gt.exclude` option to your Git configuration, either locally or globally, with a space delimited string of any additional branches you want to exclude from removal.
+To protect more branches, set `gt.exclude` to a space-separated list of names or glob patterns, locally or globally:
 
 ```sh
-git config gt.exclude "dev staging"
-# Always exclude the "dev" and "staging" branches from removal
+git config --global gt.exclude "dev staging save/*"
 ```
 
-You may also use glob patterns (wildcards) to exclude branches matching a pattern.
-
+## Tests
 ```sh
-git config gt.exclude "dev staging save/*"
-# Exclude "dev", "staging", and any branch starting with "save/"
+test/run.sh
 ```
 
-## Disclaimer
-Some of the options in this command remove branches without warning. Once a branch is removed, it might not be recoverable. You are solely responsible when running this command.
+The suite builds throwaway repositories and drives the real gum prompts through a pseudo-terminal with `script`, so it needs `gum` and `script` (util-linux). It takes about a minute because each keystroke waits for the prompt to render.
 
 ## Credits
-There are thousands of commands and aliases for cleaning up branches sprinkled across the internet. I'll specifically link the commands and posts shared in [this Twitter thread](https://twitter.com/gonedark/status/1486721735621677068), [another project](https://github.com/foriequal0/git-trim) for inspiring the name, and [git-open](https://github.com/paulirish/git-open) which I used as a code reference.
-
-And a special thanks to [Caneco](https://twitter.com/caneco) for the logo.
-
-## Contributing
-Feel free to open an issue or pull request to help contribute to the project. Currently the only code style requirement is an indentation of two spaces.
+Forked from [git-trim](https://github.com/jasonmccreary/git-trim) by [Jason McCreary](https://github.com/jasonmccreary/), which credits [this Twitter thread](https://twitter.com/gonedark/status/1486721735621677068), [foriequal0/git-trim](https://github.com/foriequal0/git-trim) for the name, and [git-open](https://github.com/paulirish/git-open) as a code reference. Logo by [Caneco](https://twitter.com/caneco).
 
 ## License
 Copyright [Jason McCreary](https://github.com/jasonmccreary/). Licensed under [MIT](http://opensource.org/licenses/MIT).

@@ -34,6 +34,18 @@ US=$'\x1f'
 TAB=$'\t'
 SEP=' · '
 
+# Palette. Midnight is near-black, so it is only ever a background, never text.
+MIDNIGHT='#0A002D'
+MIDNIGHT_800='#2E2D55'
+MIDNIGHT_600='#5C5C7D'
+MIDNIGHT_300='#A9AABD'
+MIDNIGHT_200='#C5C6D3'
+PURPLE='#9566FF'
+PURPLE_300='#BFA3FF'
+BLUE_300='#7598FF'
+WHITE='#FFFFFF'
+WARNING='#EE9C38'
+
 
 # Output
 require_gum() {
@@ -53,8 +65,17 @@ info() {
   gum log --level info -- "$*"
 }
 
+banner() {
+  gum style --bold --foreground "$WHITE" --background "$MIDNIGHT" --padding "0 1" --margin "1 0 0 0" "$*"
+}
+
 heading() {
-  gum style --bold --foreground 212 --margin "1 0 0 0" "$*"
+  # heading <text> [colour]
+  gum style --bold --foreground "${2:-$PURPLE_300}" --margin "1 0 0 0" "$1"
+}
+
+subtle() {
+  gum style --foreground "$MIDNIGHT_300" "$*"
 }
 
 spin() {
@@ -62,7 +83,8 @@ spin() {
   local title="$1" err
   shift
   if [[ -t 2 ]]; then
-    gum spin --show-error --title "$title" -- "$@"
+    gum spin --show-error --spinner.foreground "$PURPLE" --title.foreground "$MIDNIGHT_200" \
+      --title "$title" -- "$@"
   elif ! err="$("$@" 2>&1 >/dev/null)"; then
     printf '%s\n' "$err" >&2
     return 1
@@ -80,7 +102,8 @@ spin_fn() {
   out="$(mktemp)"
   "$@" >"$out" &
   pid=$!
-  gum spin --title "$title" -- bash -c "while kill -0 $pid 2>/dev/null; do sleep 0.1; done"
+  gum spin --spinner.foreground "$PURPLE" --title.foreground "$MIDNIGHT_200" --title "$title" \
+    -- bash -c "while kill -0 $pid 2>/dev/null; do sleep 0.1; done"
   if ! wait "$pid"; then
     rm -f "$out"
     return 1
@@ -347,7 +370,8 @@ print_table() {
         "${c_name[$i]}" "${c_reasons[$i]}" "$(risk_label "$i")" \
         "${c_age[$i]}" "$(action_for "$i")" "${c_subject[$i]:0:50}"
     done
-  } | gum table --print --separator "$TAB" --border rounded --border.foreground 240
+  } | gum table --print --separator "$TAB" --border rounded \
+    --border.foreground "$MIDNIGHT_600" --header.foreground "$PURPLE_300"
 }
 
 pick_label() {
@@ -372,7 +396,8 @@ pick() {
   done
 
   local -a args=(--no-limit --height 20 --label-delimiter "$TAB"
-    --header "Select branches to delete (tab or x toggles, enter continues)")
+    --header "Select branches to delete (tab or x toggles, enter continues)"
+    --cursor.foreground "$PURPLE" --header.foreground "$MIDNIGHT_300" --selected.foreground "$BLUE_300")
   if [[ -n "$preselect" ]]; then
     args+=(--selected "$preselect")
   fi
@@ -381,7 +406,9 @@ pick() {
 
 confirm() {
   # Enter alone means no.
-  gum confirm --default=false --affirmative "Delete" --negative "Cancel" "$1"
+  gum confirm --default=false --affirmative "Delete" --negative "Cancel" \
+    --prompt.foreground "$WHITE" --selected.foreground "$WHITE" --selected.background "$PURPLE" \
+    --unselected.foreground "$MIDNIGHT_200" --unselected.background "$MIDNIGHT_800" "$1"
 }
 
 
@@ -464,11 +491,11 @@ default_branch="$(resolve_default_branch)"
 base="refs/remotes/origin/$default_branch"
 operation="$(describe_operation)"
 
-heading "git trim · $operation"
+banner "git trim · $operation"
 if ((dry_run)); then
-  gum style --faint "Compared with origin/$default_branch · dry run, nothing will be deleted"
+  subtle "Compared with origin/$default_branch · dry run, nothing will be deleted"
 else
-  gum style --faint "Compared with origin/$default_branch"
+  subtle "Compared with origin/$default_branch"
 fi
 
 spin "Fetching and pruning remotes..." git fetch --all --prune \
@@ -534,7 +561,7 @@ for i in "${selected[@]}"; do
 done
 
 if ((${#at_risk_selected[@]} > 0)); then
-  heading "These have commits that exist nowhere else, which will be lost"
+  heading "These have commits that exist nowhere else, which will be lost" "$WARNING"
   print_table "${at_risk_selected[@]}"
   if confirm "Include these ${#at_risk_selected[@]} branch(es)?"; then
     to_delete+=("${at_risk_selected[@]}")

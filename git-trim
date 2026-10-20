@@ -34,8 +34,8 @@ US=$'\x1f'
 TAB=$'\t'
 SEP=' · '
 
-# Palette. Midnight is near-black, so it is only ever a background, never text.
-MIDNIGHT='#0A002D'
+# Palette.
+BLUE='#0037E6'
 MIDNIGHT_800='#2E2D55'
 MIDNIGHT_600='#5C5C7D'
 MIDNIGHT_300='#A9AABD'
@@ -66,7 +66,7 @@ info() {
 }
 
 banner() {
-  gum style --bold --foreground "$WHITE" --background "$MIDNIGHT" --padding "0 1" --margin "1 0 0 0" "$*"
+  gum style --bold --foreground "$WHITE" --background "$BLUE" --padding "0 1" --margin "1 0 0 0" "$*"
 }
 
 heading() {

@@ -68,7 +68,7 @@ Because every deletion is reviewed and its safety is checked up front, local bra
 git clone https://github.com/travis-r6s/git-trim.git $ZSH_CUSTOM/plugins/git-trim
 ```
 
-Then add `git-trim` to `plugins=(...)` in `~/.zshrc`. The plugin puts the script on your `PATH`, so it runs as `git trim`.
+Then add `git-trim` to `plugins=(...)` in `~/.zshrc`. The plugin puts the script on your `PATH`, so it runs as `git trim`, and adds a `gt` alias. The alias hides any `gt` command, such as Graphite's CLI, which `command gt` still reaches.
 
 ### Any shell
 It is a plain bash script, so zsh is optional. Install it to `~/.local/bin`, which needs to be on your `PATH`:

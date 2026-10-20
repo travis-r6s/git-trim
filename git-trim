@@ -135,6 +135,38 @@ is_protected() {
   [[ "$name" == "$default_branch" || "$name" == "$current_branch" ]] || is_excluded "$name"
 }
 
+join_or() {
+  # "a", "a or b", "a, b or c"
+  if (($# == 1)); then
+    printf '%s' "$1"
+    return
+  fi
+  local last="${*: -1}" first
+  first="$(printf '%s, ' "${@:1:$#-1}")"
+  printf '%s or %s' "${first%, }" "$last"
+}
+
+describe_operation() {
+  # A short sentence naming what this run looks for, e.g. "local branches that are gone or merged".
+  local scope=local
+  local -a parts=()
+  if ((remote_mode)); then scope=remote; fi
+  if ((want_all)); then
+    printf 'all %s branches' "$scope"
+  else
+    if ((want_pruned)); then parts+=(gone); fi
+    if ((want_merged)); then parts+=(merged); fi
+    if ((want_squashed)); then parts+=(squash-merged); fi
+    if ((want_stale)); then parts+=(stale); fi
+    if ((want_untracked)); then parts+=(untracked); fi
+    if [[ -n "$reset" ]]; then parts+=("not on $reset"); fi
+    printf '%s branches that are %s' "$scope" "$(join_or "${parts[@]}")"
+  fi
+  if ((tracked)); then
+    printf ', plus the remote branches they track'
+  fi
+}
+
 
 # Classification
 squash_merged() {
@@ -428,18 +460,26 @@ if [[ -n "$reset" ]] && ! git remote get-url "$reset" >/dev/null 2>&1; then
   die "No remote named '$reset'."
 fi
 
-spin "Fetching and pruning remotes..." git fetch --all --prune \
-  || die "Fetch failed, so remote branch data may be stale. Nothing was deleted."
-
 default_branch="$(resolve_default_branch)"
 base="refs/remotes/origin/$default_branch"
+operation="$(describe_operation)"
+
+heading "git trim · $operation"
+if ((dry_run)); then
+  gum style --faint "Compared with origin/$default_branch · dry run, nothing will be deleted"
+else
+  gum style --faint "Compared with origin/$default_branch"
+fi
+
+spin "Fetching and pruning remotes..." git fetch --all --prune \
+  || die "Fetch failed, so remote branch data may be stale. Nothing was deleted."
 current_branch="$(git symbolic-ref --quiet --short HEAD || true)"
 stale_before="$(git rev-parse --since='3 months ago')"
 stale_before="${stale_before#--max-age=}"
 load_excludes
 load_worktree_branches
 
-records="$(spin_fn "Looking for branches to trim..." classify)" || die "Could not classify branches."
+records="$(spin_fn "Looking for $operation..." classify)" || die "Could not classify branches."
 
 declare -a c_kind=() c_name=() c_reasons=() c_at_risk=() c_age=() c_sha=() c_subject=() c_remote=() c_remote_branch=()
 declare -a skipped=()
@@ -458,12 +498,6 @@ while IFS="$US" read -r kind name reasons at_risk age sha subject remote remote_
     c_remote_branch+=("$remote_branch")
   fi
 done <<<"$records"
-
-target="local branches"
-if ((remote_mode)); then
-  target="remote branches"
-fi
-heading "git trim · $target compared with origin/$default_branch"
 
 if ((${#skipped[@]} > 0)); then
   info "Skipping branches checked out in a worktree: ${skipped[*]}"
